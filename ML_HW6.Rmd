@@ -1,0 +1,338 @@
+---
+title: "ML_HW6"
+date: "2022-11-19"
+output: 
+  html_document:
+   toc: true
+   toc_float: true
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Please click [here](https://github.com/Donovan-Rasamoelison/Machine_learning_HW6) for the link to the github repository.
+
+```{r, message = F, warning = F}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(discrim)
+library(corrplot)
+library(klaR)
+library(glmnet)
+library(yardstick)
+library(rpart.plot)
+library(vip)
+library(randomForest)
+library(xgboost)
+library(ranger)
+
+set.seed(0)
+
+```
+
+
+# Coding questions
+
+## Question 1 - using clean_names() on pokemon data
+
+```{r, message = F, warning = F}
+pokemon <- read.csv("Pokemon.csv") %>% clean_names()
+
+pokemon %>% count("Pokemon type" = fct_reorder(as.factor(type_1),type_1,.fun='length')) # looking at the number of types and the types with few observation
+
+pokemon_clean <- pokemon %>%
+  filter(type_1 %in% c("Bug","Fire","Grass","Normal","Water","Psychic")) %>% #filtering to only include selected types
+  mutate(across(c(type_1,legendary), ~ as.factor(.))) #making type_1 and legendary factor
+
+#Splitting the data to training and test set
+pokemon_split <- initial_split(pokemon_clean, prop = 0.8, strata = "type_1")
+pokemon_clean_train <- training(pokemon_split)
+pokemon_clean_test  <- testing(pokemon_split)
+
+#V-fold cross validation (k=5)
+pokemon_clean_fold <- vfold_cv(pokemon_clean_train, v=5, strata = "type_1")
+
+#creating a recipe
+pokemon_clean_recipe <- recipe(formula = type_1 ~ legendary + generation + sp_atk + attack + speed + defense + hp + sp_def, data = pokemon_clean_train) %>%
+  step_dummy(legendary, generation) %>%
+  step_center(all_predictors()) %>%
+  step_normalize(all_predictors())
+```
+
+
+## Question 2 - Correlation matrix of the training set
+
+```{r, message = F, warning = F}
+M <- pokemon_clean_train %>% dplyr::select(type_1 , legendary , generation , sp_atk , attack , speed , defense , hp , sp_def) %>%
+  mutate(across( c(type_1, legendary), ~as.numeric(.))) 
+
+corrplot(round(cor(M),2) ,method = 'circle', type = 'lower', insig='blank', addCoef.col ='black', number.cex = 0.8)
+
+```
+
+Legendary, sp_atk, and attack have higher correlation to most of the variables. This makes sense because it shows the importance of these variables on the strength of the Pokemon.
+
+## Question 3 - Decision tree model
+
+```{r, message = F, warning = F}
+tree_spec <- decision_tree() %>% set_engine("rpart")
+class_tree_spec <- tree_spec %>% set_mode("classification")
+
+#setting the workflow tuning cost_complexity
+class_tree_wf <- workflow() %>%
+  add_model(class_tree_spec %>% set_args(cost_complexity = tune())) %>%
+  add_recipe(pokemon_clean_recipe)
+
+#creating a grid of values for cost_complexity
+param_grid <- grid_regular(cost_complexity(range = c(-3,-1)), levels = 10)
+
+#fitting the models on the validation folds
+tune_res <- tune_grid(
+  class_tree_wf,
+  resamples = pokemon_clean_fold,
+  grid = param_grid,
+  metrics = metric_set(roc_auc)
+)
+
+autoplot(tune_res)
+```
+
+We observe that the single decision tree performs better with smaller complexity values.
+
+## Question 4 - ROC_AUC of the best performing model
+
+```{r, message = F, warning = F}
+collect_metrics(tune_res) %>% arrange(desc(mean))
+```
+
+The roc_auc of the best performing pruned decision tree is 0.658.
+
+## Question 5 - fitting and visualizing best performing decision tree
+
+```{r, message = F, warning = F}
+best_complexity <- select_best(tune_res, metric = "roc_auc")
+class_tree_final <- finalize_workflow(class_tree_wf, best_complexity)
+
+class_tree_final_fit <- fit(class_tree_final, data = pokemon_clean_train)
+class_tree_final_fit %>%
+  extract_fit_engine() %>%
+  rpart.plot()
+```
+
+
+## Question 5 - Setting up Random forest
+
+```{r, message = F, warning = F}
+rf_spec <- rand_forest(mtry = tune(),trees = tune(), min_n = tune() ) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+#setting up workflow
+rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(pokemon_clean_recipe)
+
+#Creating regular grids 
+model_grid <- grid_regular(mtry(range = c(1,8)), trees(range = c(10,2000)), min_n(range = c(10,80)), levels = 8)
+
+```
+
+Definition of the variables to be tuned:
+
+mtry = number of predictors that will be randomly sampled at each split when creating tree models. 
+
+trees = the number of trees.
+
+min_n = minimum number of data points in a node that are required for the node to be split further.
+
+mtry cannot be less than 1 or larger than 8 for this model because 8 is the total numbers of predictors, and at least 1 predictor must be used. mtry = 8 represents a bagging model.
+
+## Question 6 - tuning the Random Forest model
+
+```{r, message = F, warning = F, eval=FALSE}
+
+tune_res_rf <- tune_grid(
+  rf_wf,
+  resamples = pokemon_clean_fold,
+  grid = model_grid,
+  metrics = metric_set(roc_auc)
+)
+#Save tune_res_rf as an R object to not run it again when knitting
+saveRDS(tune_res_rf, file="tune_res_rf_saved.RData")
+```
+
+
+```{r, message = F, warning = F}
+tune_res_rf_saved <- readRDS("tune_res_rf_saved.RData")
+autoplot(tune_res_rf_saved)
+select_best(tune_res_rf_saved, metric = "roc_auc")
+```
+
+The roc_auc of the different models on the folds seems to converge when the number of trees is high (more than 300).
+
+The values of the hyperparameters that yield the best model are:
+mtyr = , trees = , and min_n = 
+
+## Question 7 - ROC_AUC of the best performing Random Forest model
+
+```{r, message = F, warning = F}
+collect_metrics(tune_res_rf_saved) %>% arrange(desc(mean))
+```
+
+The roc_auc of the best performing Random Forest model is 0.738
+
+
+## Question 8 - Importance plot of the best performing model
+```{r, message = F, warning = F}
+best_complexity_rf <- select_best(tune_res_rf_saved, metric = "roc_auc")
+best_complexity_rf
+
+rf_spec_final <- rand_forest(mtry = best_complexity_rf$mtry,trees = best_complexity_rf$trees, min_n = best_complexity_rf$min_n ) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_fit <- fit(rf_spec_final, type_1 ~ legendary + generation + sp_atk + attack + speed + defense + hp + sp_def, data = pokemon_clean_train)
+
+vip(rf_fit)
+```
+
+- sp_atk is the most useful variable. 
+- legendary is the least useful variable.
+- Yes, these results are what I expected because type of pokemon is defined by its special attack.
+
+## Question 9 - Setting a boosted tree model and workflow
+```{r, message = F, warning = F}
+boost_spec <- boost_tree(trees = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+#Setting up workflow
+boost_wf <- workflow() %>%
+  add_model(boost_spec) %>%
+  add_recipe(pokemon_clean_recipe)
+
+#Creating regular grids 
+boosted_grid <- grid_regular(trees(range = c(10,2000)), levels = 10)
+
+#tuning the Boosted model
+tune_res_boosted <- tune_grid(
+  boost_wf,
+  resamples = pokemon_clean_fold,
+  grid = boosted_grid,
+  metrics = metric_set(roc_auc)
+)
+
+autoplot(tune_res_boosted)
+
+collect_metrics(tune_res_boosted) %>% arrange(desc(mean))
+
+```
+
+I observe that roc_auc is increasing at low numbers of trees then starts to decrease.
+The ROC_AUC of the best performing Boosted model is 0.725
+
+## Question 10 - Selecting the final best model
+```{r, message = F, warning = F}
+#A table comparing the roc_auc
+model <- c("Pruned tree","Random Forest","Boosted tree")
+roc_auc_model <- c( 0.658, 0.738, 0.725)
+tibble(model, roc_auc_model)
+
+#fitting the best model (=Random Forest) on the test set
+best_tuned <- select_best(tune_res_rf_saved, metric = "roc_auc")
+best_model_final_wf <- finalize_workflow(rf_wf, best_tuned)
+best_model_fit <- fit(best_model_final_wf, data = pokemon_clean_test)
+
+#ROC AUC for the testing set
+augment(best_model_fit, new_data = pokemon_clean_test) %>% roc_auc(truth = type_1, estimate = .pred_Bug:.pred_Water)
+
+#ROC for each level of the outcome
+augment(best_model_fit, new_data = pokemon_clean_test) %>% roc_curve(truth = type_1, estimate = .pred_Bug:.pred_Water) %>% autoplot()
+
+#heatmap of the confusion matrix
+augment(best_model_fit, new_data = pokemon_clean_test) %>% conf_mat(truth = type_1, estimate = .pred_class) %>% autoplot(type = "heatmap")
+
+```
+
+Random Forest model performed best on the folds.
+The model was best at predicting the class Fire and Grass.
+The model was worst at predicting the class Psychic.
+
+
+## Question 11 - 231 students only 
+
+Fitting a Random Forest model on abalone data.
+
+```{r, message = F, warning = F}
+abalone <- read_csv("abalone.csv")
+
+abalone <- abalone %>%
+  mutate(age = rings + 1.5)
+
+abalone <- abalone %>%
+  dplyr::select(-c(rings))
+
+#splitting the data
+abalone_split <- initial_split(abalone, prop = 0.80, strata = age)
+abalone_train <- training(abalone_split)
+abalone_test  <- testing(abalone_split)
+
+#setting recipe from abalone (HW2)
+abalone_recipe <- recipe(age ~ ., data = abalone_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ type_M:shucked_weight) %>%
+  step_interact(terms = ~ longest_shell:diameter) %>%
+  step_interact(terms = ~ shucked_weight:shell_weight) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+#V-fold cross validation (k=510
+abalon_fold <- vfold_cv(abalone_train, v=10, strata = "age")
+
+#setting up random forest model
+abalone_spec <- rand_forest(mtry = tune(),trees = tune(), min_n = tune() ) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+#setting up workflow
+abalone_wf <- workflow() %>%
+  add_model(abalone_spec) %>%
+  add_recipe(abalone_recipe)
+
+#Creating regular grids 
+abalone_grid <- grid_regular(mtry(range = c(1,8)), trees(range = c(10,2000)), min_n(range = c(10,80)), levels = 8)
+```
+
+```{r, message = F, warning = F, eval=FALSE}
+#fitting the model on the cross validation folds
+abalone_res_rf <- tune_grid(
+  abalone_wf,
+  resamples = abalon_fold,
+  grid = abalone_grid
+  )
+
+#Save abalone_res_rf as an R object to not run it again when knitting
+saveRDS(abalone_res_rf, file="abalone_res_rf_saved.RData")
+```
+
+```{r, message = F, warning = F}
+abalone_res_rf_saved <- readRDS("abalone_res_rf_saved.RData")
+autoplot(abalone_res_rf_saved)
+
+#Selecting best model and finalizing workflow
+best_abalone <- select_best(abalone_res_rf_saved)
+abalone_wf_final <- finalize_workflow(abalone_wf , best_abalone)
+
+#fitting on the test set
+abalone_best_model_fit <- fit(abalone_wf_final, data = abalone_test)
+
+#RMSE for the testing set
+rmse <- augment(abalone_best_model_fit, new_data = abalone_test) %>% rmse(truth = age, estimate = .pred)
+rmse
+```
+
+The model's RMSE on the testing set is `r rmse`.
+
